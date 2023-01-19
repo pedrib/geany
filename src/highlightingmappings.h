@@ -291,7 +291,9 @@ static const HLStyle highlighting_styles_C[] =
 	/* used for local structs and typedefs */
 	{ SCE_C_GLOBALCLASS,			"globalclass",				FALSE },
 	{ SCE_C_TASKMARKER,				"taskmarker",				FALSE },
-	{ SCE_C_ESCAPESEQUENCE,			"escapesequence",			FALSE }
+	{ SCE_C_ESCAPESEQUENCE,			"escapesequence",			FALSE },
+	{ SCE_C_FUNC_DECL,			"function_declaration",			FALSE },
+	{ SCE_C_FUNC,				"function",				FALSE }
 };
 static const HLKeyword highlighting_keywords_C[] =
 {

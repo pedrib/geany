@@ -99,6 +99,55 @@ bool OnlySpaceOrTab(const std::string &s) noexcept {
 	return true;
 }
 
+char NextNotSpace(StyleContext &sc, int *j){
+	char ret;
+	int comment = 0, str = 0;
+	/*because we are looking forward, we need parse comments manually*/
+	do{
+		ret = sc.GetRelativeCharacter((*j)++);
+		if( ret == '\\' ){
+			ret = sc.GetRelativeCharacter((*j)++);
+		}else if( comment==0 && ret == '"'){
+			str = !str;
+		}
+		if( str==0 && comment == 0 && ret == '/' && sc.GetRelativeCharacter(*j) == '*'){
+			comment=1;
+			(*j)++;
+		}else if( str==0 && comment && ret == '*' && sc.GetRelativeCharacter(*j) == '/'){
+			comment=0;
+			(*j)++;
+			ret = sc.GetRelativeCharacter((*j)++);
+		}
+	}while(ret != 0 && (IsASpace(ret) || comment != 0 || str != 0));
+	return ret;
+}
+
+char PrevNotSpace(StyleContext &sc, int *j){
+	char ret;
+	/* comments not ignored here,
+	 * instead we are using known style*/
+	do{
+		ret = sc.GetRelativeCharacter((*j)--);
+		if( ret == '\\' ){
+			ret = sc.GetRelativeCharacter((*j)--);
+		}
+	}while(ret != 0 && IsASpace(ret) );
+	return ret;
+}
+
+bool ScanForWord(StyleContext &sc,int *j, const char* str, int n){
+	if(n>0){
+		for(int i=0;i<n;i++)
+			if(sc.GetRelativeCharacter((*j)++) != str[i] )
+				return 0;//not found
+	}else{//reverse direction
+		for(int i=-n-1;i>=0;i--)
+			if(sc.GetRelativeCharacter((*j)--) != str[i] )
+				return 0;//not found
+	}
+	return 1;//ok
+}
+
 std::vector<std::string> StringSplit(const std::string &text, int separator) {
 	std::vector<std::string> vs(text.empty() ? 0 : 1);
 	for (const char ch : text) {
@@ -355,6 +404,9 @@ struct OptionsCPP {
 	bool foldPreprocessorAtElse;
 	bool foldCompact;
 	bool foldAtElse;
+	bool highligh_functions;
+	bool highligh_functions_declaration;
+	bool highligh_functions_prototypes;
 	OptionsCPP() {
 		stylingWithinPreprocessor = false;
 		identifiersAllowDollars = true;
@@ -377,6 +429,9 @@ struct OptionsCPP {
 		foldPreprocessorAtElse = false;
 		foldCompact = false;
 		foldAtElse = false;
+		highligh_functions = false;
+		highligh_functions_declaration = false;
+		highligh_functions_prototypes = false;
 	}
 };
 
@@ -420,6 +475,15 @@ struct OptionSetCPP : public OptionSet<OptionsCPP> {
 
 		DefineProperty("lexer.cpp.escape.sequence", &OptionsCPP::escapeSequence,
 			"Set to 1 to enable highlighting of escape sequences in strings");
+
+		DefineProperty("lexer.cpp.highligh.functions", &OptionsCPP::highligh_functions,
+			"Set to 1 to enable highlighting of functions calls.");
+
+		DefineProperty("lexer.cpp.highligh.functions_declaration", &OptionsCPP::highligh_functions_declaration,
+			"Set to 1 to enable highlighting of functions declarations");
+
+		DefineProperty("lexer.cpp.highligh.functions_prototypes", &OptionsCPP::highligh_functions_prototypes,
+			"Set to 1 to enable highlighting of functions prototypes");
 
 		DefineProperty("fold", &OptionsCPP::fold);
 
@@ -799,6 +863,7 @@ void SCI_METHOD LexerCPP::Lex(Sci_PositionU startPos, Sci_Position length, int i
 	bool isStringInPreprocessor = false;
 	bool inRERange = false;
 	bool seenDocKeyBrace = false;
+	int skipCppParamInit = 0;
 
 	Sci_Position lineCurrent = styler.GetLine(startPos);
 	if ((MaskActive(initStyle) == SCE_C_PREPROCESSOR) ||
@@ -914,6 +979,12 @@ void SCI_METHOD LexerCPP::Lex(Sci_PositionU startPos, Sci_Position length, int i
 
 		const bool atLineEndBeforeSwitch = sc.atLineEnd;
 
+		//printf("_denis: %c->%c %d [%c]\r\n",chPrevNonWhite,sc.ch,MaskActive(sc.state),prev_c);
+		if(skipCppParamInit>0 && sc.currentPos >= skipCppParamInit){
+			sc.SetState(SCE_CPP_PARENTHESIZED_INITIALIZATION|activitySet);
+			skipCppParamInit=0;
+		}
+
 		// Determine if the current state should terminate.
 		switch (MaskActive(sc.state)) {
 			case SCE_C_OPERATOR:
@@ -934,6 +1005,11 @@ void SCI_METHOD LexerCPP::Lex(Sci_PositionU startPos, Sci_Position length, int i
 				if (!(setWord.Contains(sc.ch)))
 					sc.SetState(SCE_C_DEFAULT|activitySet);
 				break;
+			case SCE_CPP_PARENTHESIZED_INITIALIZATION:
+				if (sc.ch == '{'){
+					sc.SetState(SCE_C_DEFAULT|activitySet);
+				}
+				break;
 			case SCE_C_IDENTIFIER:
 				if (sc.atLineStart || sc.atLineEnd || !setWord.Contains(sc.ch) || (sc.ch == '.')) {
 					char s[1000];
@@ -942,19 +1018,238 @@ void SCI_METHOD LexerCPP::Lex(Sci_PositionU startPos, Sci_Position length, int i
 					} else {
 						sc.GetCurrentLowered(s, sizeof(s));
 					}
+
+					//~ printf("denis: %s %c %d level=%d\r\n", s, sc.GetRelativeCharacter(-20), MaskActive(sc.state), styler.LevelAt(styler.GetLine(sc.currentPos))>>16 );
+
 					if (keywords.InList(s)) {
 						lastWordWasUUID = strcmp(s, "uuid") == 0;
 						sc.ChangeState(SCE_C_WORD|activitySet);
 					} else if (keywords2.InList(s)) {
 						sc.ChangeState(SCE_C_WORD2|activitySet);
-					} else if (keywords4.InList(s)) {
-						sc.ChangeState(SCE_C_GLOBALCLASS|activitySet);
 					} else {
-						int subStyle = classifierIdentifiers.ValueFor(s);
-						if (subStyle >= 0) {
-							sc.ChangeState(subStyle|activitySet);
+						/*
+						 * process function highlighting before tags
+						 * to be able handle parenthesized initializers
+						 * */
+						if(options.highligh_functions){
+							int j=0;
+							/* description of the algorithm:
+							 * 1) check is the next symbol after identifier is open bracket '('
+							 * 2) if so, then suppose this is function, find next symbol after close bracket ')' next_c
+							 * 3) find 'interesting' symbol before function name prev_c
+							 * 4) finally compare next_c and prev_c and make decision how to highlight
+							 * */
+
+							char next_c = NextNotSpace(sc, &j);
+
+							if( next_c == '<' ){//skip C++ template
+								int bracket=0;
+								char tmp;
+								do{//find end of template definition
+									if( next_c == '>' && bracket>0 ) bracket--;
+									tmp = NextNotSpace(sc, &j);
+									if(next_c == '<' && tmp == '<'){
+										j--;
+										break;//skip '<<'
+									}else
+										next_c=tmp;
+									if( next_c == '<' ) bracket++;
+								}while(next_c != 0 && (
+								      (next_c != '>' &&
+								       next_c != '=' &&
+								       next_c != '}' &&
+								       next_c != '{' &&
+								       next_c != '+' &&
+								       next_c != '%' &&
+								       next_c != ';') || bracket != 0 ) );
+
+									next_c = NextNotSpace(sc, &j);//now should be '(', if not then this is not function
+							}
+
+							if( next_c == '(' ){//lets begin
+								int bracket=0, prev_style=0, j_next = 0;
+								char prev_c = 0;
+								int istart = -1 - sc.LengthCurrent();//relative start position of current identifier
+
+								do{//find end of parameters definition
+									if( next_c == ')' && bracket>0) bracket--;
+									next_c = NextNotSpace(sc, &j);
+									if( next_c == '(' ){
+										bracket++;
+									}
+								}while(next_c != 0 && ( next_c != ')' || bracket != 0 ) );
+
+								next_c = NextNotSpace(sc, &j);
+
+								/*skip const in C++*/
+								if(next_c == 'c' && ScanForWord(sc, &j, "onst",4) ){
+									next_c = NextNotSpace(sc, &j);//next after 'const' should be ';' or '{'
+								}
+
+								if(next_c == '=') next_c = ';';//C++ virtual method,force highlight as prototype
+
+								prev_c = 0;
+								prev_style=0;
+								styler.Flush();//apply current style
+								j_next=j;      //save current position
+								j= istart;     //start position to scan prev_c
+								int prev_from_space = IsASpace(sc.GetRelativeCharacter(j));//keep in mind, is there was space before function name?
+
+								/* Now scan in reverse direction,
+								 * find char before function name,
+								 * then checking is is prototype/declaration or not
+								 * */
+								do{
+									prev_c = PrevNotSpace(sc,&j);
+									prev_style = MaskActive(styler.StyleAt(sc.currentPos+j+1));
+									//~ printf("{ %d %d '%c' } ", j, prev_style, sc.GetRelativeCharacter(j+1));
+								}while(IsStreamCommentStyle(prev_style) ||
+								       prev_style == SCE_C_PREPROCESSORCOMMENT);
+
+								while(1){//used for skipping preprocessor
+									int k = j;
+
+									if(prev_c == ':' ) {
+										if(sc.GetRelativeCharacter(j) != ':'){
+											int tmpS = MaskActive(styler.StyleAt(sc.currentPos+j));
+											if(tmpS != SCE_C_WORD && tmpS != SCE_C_WORD2){//checking is it 'public:'
+												prev_c = ';';
+												j=-1;
+											}
+										}
+									}else if(prev_c == 't' && ScanForWord(sc, &k, "explici",-7) ){
+										j-=7;//skip 'explicit'
+										do{
+											prev_c = PrevNotSpace(sc,&j);
+											prev_style = MaskActive(styler.StyleAt(sc.currentPos+j+1));
+										}while(IsStreamCommentStyle(prev_style) ||
+										       prev_style == SCE_C_PREPROCESSORCOMMENT);
+										continue;//check again
+									}else if(prev_style == SCE_C_PREPROCESSOR){
+
+										if(prev_c == 'e' && ScanForWord(sc, &k, "#defin",-6) ){
+											next_c=prev_c = 0;//don't highlight #define
+											j=-1;
+										}else{
+											/*skip preprocessor*/
+											do{
+												prev_c = PrevNotSpace(sc,&j);
+												prev_style = MaskActive(styler.StyleAt(sc.currentPos+j+1));
+											}while( prev_c != 0 && 
+												( prev_style == SCE_C_PREPROCESSOR ||
+												  IsStreamCommentStyle(prev_style) ||
+												  prev_style == SCE_C_PREPROCESSORCOMMENT) );
+											continue;//check again
+										}
+									}else if( prev_style == SCE_C_NUMBER ||
+										  prev_style == SCE_C_STRING ||
+										  prev_style == SCE_C_STRINGRAW ||
+										  prev_style == SCE_C_CHARACTER   ){
+										prev_c = 0;//not allowed in function prototype
+										j=-1;
+									}else if( prev_style == SCE_C_COMMENTLINE ){
+										prev_c = ';';//comment line not allowed in function prototype
+										j=-1;
+									}else if(prev_c =='*' && (prev_from_space || IsASpace(sc.GetRelativeCharacter(j))) ){
+										/*
+										 * example: asd* myfunc()
+										 * is '*' is a pointer definition or operator?
+										 * to resolve that, try to find some operator or brackets before it
+										 * 
+										 * */
+										int tmp_c,tmp_style,new_c=0,new_j;
+										do{
+											do{
+												tmp_c = PrevNotSpace(sc,&k);
+												tmp_style = MaskActive(styler.StyleAt(sc.currentPos+k+1));
+											}while(IsStreamCommentStyle(tmp_style) || tmp_style == SCE_C_PREPROCESSORCOMMENT);
+
+											if(new_c == 0 && tmp_c !=0 && (tmp_style != SCE_C_OPERATOR && tmp_style != SCE_C_COMMENTLINE)){
+												new_c = tmp_c;//remember next prev character
+												new_j = k;
+											}
+										}while(tmp_c !=0 && (tmp_style != SCE_C_OPERATOR && tmp_style != SCE_C_COMMENTLINE) );
+
+										//~printf("tmpc='%c'",tmp_c);
+										if( (tmp_style != SCE_C_COMMENTLINE) && (
+										    setRelOp.Contains(tmp_c) ||
+										    setMultOp.Contains(tmp_c)  ||
+										    setLogicalOp.Contains(tmp_c) ||
+										    tmp_c == '^' || tmp_c == '~' ||
+										    tmp_c == '(' || tmp_c == ')') ){
+													prev_c = ';' ;//operator was found, highlight current identifier as function call
+										}else if(new_c != 0){
+											prev_c = new_c;
+											j=new_j;
+										}
+									}else if(prev_c == '>'){//skip C++ function declaration with template
+											do{
+												prev_c = PrevNotSpace(sc,&j);
+												prev_style = MaskActive(styler.StyleAt(sc.currentPos+j+1));
+											}while(IsStreamCommentStyle(prev_style) || prev_style == SCE_C_PREPROCESSORCOMMENT);
+											continue;//check again
+									}
+
+									break;
+								}//while(1)
+
+								/* check some special cases */
+								int k = j;
+								if(prev_c == 'n' && ScanForWord(sc, &k, "retur",-5) ){
+									char tmp = sc.GetRelativeCharacter(k);
+									if(IsASpace(tmp) || tmp == '}'){
+										prev_c=';';//return can't be in declaration
+									}
+								}else if(prev_c == 'e' && ScanForWord(sc, &k, "els",-3) ){
+									char tmp = sc.GetRelativeCharacter(k);
+									if(IsASpace(tmp) || tmp == '}'){
+										prev_c=';';//else can't be in declaration
+									}
+								}else if(prev_c == 'w' && ScanForWord(sc, &k, "ne",-2) ){
+									char tmp = sc.GetRelativeCharacter(k);
+									if(IsASpace(tmp) || tmp == '='){
+										next_c=prev_c = 0;//C++ don't highlight object initialization
+									}
+								}
+
+								//~ printf("denis10: %s %d '%c'[%d]<- ->'%c'\r\n",s, j, prev_c, styler.StyleAt(sc.currentPos+j), next_c);
+
+								/* now we are ready to highlight*/
+
+								if( ( (next_c == ';' || next_c == '{')  &&
+								      (prev_c !='.' && setWord.Contains(prev_c))  ) ||
+								    ( next_c == '{' && (prev_c==':' /*|| prev_c=='}'*/ || prev_c == '~' ) ) ||
+								    ( next_c == ':' && (prev_c==':' || prev_c=='}' || prev_c==';') )
+								 ){
+									//~ printf("denis_decl: %s %d %c[%d]<- ->%c\r\n",s,j,prev_c,styler.StyleAt(sc.currentPos+j),next_c);
+									if( options.highligh_functions_declaration &&
+									    !(next_c == ';' && !options.highligh_functions_prototypes)){
+										sc.ChangeState(SCE_C_FUNC_DECL|activitySet);
+									}
+								}else if((next_c > ' ' && next_c < 'A') || (next_c > 'Z' && next_c < 'a')  || next_c > 'z' ){
+									//~ printf("denis_func: %s %c<- ->%c\r\n",s,prev_c,next_c);
+									sc.ChangeState(SCE_C_FUNC|activitySet);
+								}
+
+								if( next_c == ':' && (prev_c==':' || prev_c=='}' || prev_c=='{' || prev_c==';')){
+									/*parenthesized initializers see SCE_CPP_PARENTHESIZED_INITIALIZATION*/
+									skipCppParamInit = sc.currentPos + j_next;
+								}
+
+							}
+						}//if(options.highligh_functions)
+
+						if (keywords4.InList(s)) {
+							sc.ChangeState(SCE_C_GLOBALCLASS|activitySet);
+						} else {
+
+							int subStyle = classifierIdentifiers.ValueFor(s);
+							if (subStyle >= 0) {
+								sc.ChangeState(subStyle|activitySet);
+							}
 						}
-					}
+					}//keywords2 else
+
 					const bool literalString = sc.ch == '\"';
 					if (literalString || sc.ch == '\'') {
 						size_t lenS = strlen(s);
@@ -987,7 +1282,7 @@ void SCI_METHOD LexerCPP::Lex(Sci_PositionU startPos, Sci_Position length, int i
 				}
 				break;
 			case SCE_C_PREPROCESSOR:
-				if (options.stylingWithinPreprocessor) {
+                if (options.stylingWithinPreprocessor || isIncludePreprocessor) {
 					if (IsASpace(sc.ch) || (sc.ch == '(')) {
 						sc.SetState(SCE_C_DEFAULT|activitySet);
 					}
